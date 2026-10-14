@@ -5160,6 +5160,7 @@ static json get_res_props(const server_context_meta & meta, const common_params 
         { "build_info",                  meta.build_info },
         { "is_sleeping",                 is_sleeping },
         { "cors_proxy_enabled",          params.ui_mcp_proxy },
+        { "system_prompt",               !params.system_prompt.empty() },
     };
     if (params.use_jinja) {
         if (!tmpl_tools.empty()) {
@@ -5458,6 +5459,7 @@ void server_routes::init_routes() {
         auto res = create_response();
         std::vector<raw_buffer> files;
         json body = json::parse(req.body);
+        this->override_system_prompt(body["messages"]);
         common_chat_session session;
         json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
@@ -5521,6 +5523,7 @@ void server_routes::init_routes() {
         json body = server_chat_convert_responses_to_chatcmpl(json::parse(req.body));
         SRV_DBG("%s\n", "Request converted: OpenAI Responses -> OpenAI Chat Completions");
         SRV_DBG("converted request: %s\n", body.dump().c_str());
+        this->override_system_prompt(body["messages"]);
         common_chat_session session;
         json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
@@ -5579,6 +5582,7 @@ void server_routes::init_routes() {
         json body = server_chat_convert_anthropic_to_oai(json::parse(req.body));
         SRV_DBG("%s\n", "Request converted: Anthropic -> OpenAI Chat Completions");
         SRV_DBG("converted request: %s\n", body.dump().c_str());
+        this->override_system_prompt(body["messages"]);
         common_chat_session session;
         json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
@@ -5605,6 +5609,7 @@ void server_routes::init_routes() {
         std::vector<raw_buffer> files; // dummy, unused
         common_chat_session session;   // dummy, unused
         json body = json::parse(req.body);
+        this->override_system_prompt(body["messages"]);
         json data = oaicompat_chat_params_parse(
             ctx_server.vocab,
             body,
@@ -6162,6 +6167,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_count_tokens(const s
             return res;
     }
 
+    this->override_system_prompt(body["messages"]);
     common_chat_session session; // dummy, unused
     json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
@@ -6209,5 +6215,18 @@ void server_routes::update_cached_responses(bool is_sleeping) {
         ctx_server.reset_metrics_bucket();
 
         should_reset_buckets = false;
+    }
+}
+
+void server_routes::override_system_prompt(json & messages) {
+    // check is -sys/-sysf was used to set a system prompt
+    if (this->params.system_prompt.empty()) { return; }
+
+    // replace system message with server wide message
+    if ((!messages.empty()) && (messages[0]["role"] == "system")) {
+        if (messages[0]["content"] == this->params.system_prompt) { return; }
+        messages[0]["content"] = this->params.system_prompt;
+    } else {
+        messages.insert_before({ {"role", "system"}, {"content", this->params.system_prompt} });
     }
 }
