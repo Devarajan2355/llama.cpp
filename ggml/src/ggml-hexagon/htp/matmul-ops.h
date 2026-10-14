@@ -17,9 +17,14 @@ extern "C" {
 #define HTP_MM_HMX_TILE_N_ROWS 32
 #define HTP_MM_HMX_TILE_SIZE   (32 * 32 * sizeof(__fp16)) // 2048 bytes
 #define HTP_MM_HMX_TILE_N_ELMS 1024
-#define HTP_MM_HMX_MIN_NROWS   4
+#define HTP_MM_HMX_MIN_NROWS      4
+#define HTP_MM_HMX_Q1_0_MIN_NROWS 8
 
 // --- Weight Repacked Tile Sizes ---
+#define HTP_MM_WEIGHT_TILE_K_Q1_0            128
+#define HTP_MM_WEIGHT_TILE_SIZE_Q1_0         576
+#define HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q1_0 640
+
 #define HTP_MM_WEIGHT_TILE_SIZE_Q4_0   576
 #define HTP_MM_WEIGHT_TILE_SIZE_Q4_1   640
 #define HTP_MM_WEIGHT_TILE_SIZE_Q8_0   1088
@@ -213,6 +218,10 @@ next_nc:
 }
 
 // --- Tile Size Helpers ---
+static inline uint32_t htp_mm_get_weight_tile_k(int weight_type) {
+    return weight_type == HTP_TYPE_Q1_0 ? HTP_MM_WEIGHT_TILE_K_Q1_0 : 32;
+}
+
 static inline uint32_t htp_mm_get_weight_tile_size(int weight_type) {
     switch (weight_type) {
         case HTP_TYPE_Q4_0:
@@ -223,6 +232,8 @@ static inline uint32_t htp_mm_get_weight_tile_size(int weight_type) {
             return HTP_MM_WEIGHT_TILE_SIZE_Q4_1;
         case HTP_TYPE_Q8_0:
             return HTP_MM_WEIGHT_TILE_SIZE_Q8_0;
+        case HTP_TYPE_Q1_0:
+            return HTP_MM_WEIGHT_TILE_SIZE_Q1_0;
         case HTP_TYPE_Q5_K:
             return HTP_MM_WEIGHT_TILE_SIZE_Q5_K;
         case HTP_TYPE_Q6_K:
@@ -248,6 +259,8 @@ static inline uint32_t htp_mm_get_weight_aligned_tile_size(int weight_type) {
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q4_1;
         case HTP_TYPE_Q8_0:
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q8_0;
+        case HTP_TYPE_Q1_0:
+            return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q1_0;
         case HTP_TYPE_Q5_K:
             return HTP_MM_WEIGHT_ALIGNED_TILE_SIZE_Q5_K;
         case HTP_TYPE_Q6_K:
@@ -284,7 +297,6 @@ static inline size_t htp_mm_q8_1_tiled_row_size(uint32_t ne) {
 }
 
 static inline size_t htp_mm_get_tiled_row_stride(int weight_type, uint32_t k) {
-    uint32_t nb = (k + QK_Q4_0_TILED - 1) / QK_Q4_0_TILED;
     switch (weight_type) {
         case HTP_TYPE_Q4_0:
         case HTP_TYPE_IQ4_NL:
@@ -296,7 +308,10 @@ static inline size_t htp_mm_get_tiled_row_stride(int weight_type, uint32_t k) {
         case HTP_TYPE_Q3_K:
         case HTP_TYPE_Q2_K:
         case HTP_TYPE_MXFP4:
-            return (size_t) nb * htp_mm_get_weight_tile_size(weight_type);
+            return (size_t) ((k + QK_Q4_0_TILED - 1) / QK_Q4_0_TILED) * htp_mm_get_weight_tile_size(weight_type);
+        case HTP_TYPE_Q1_0:
+            return (size_t) ((k + HTP_MM_WEIGHT_TILE_K_Q1_0 - 1) / HTP_MM_WEIGHT_TILE_K_Q1_0) *
+                HTP_MM_WEIGHT_TILE_SIZE_Q1_0;
         case HTP_TYPE_F16:
             return (size_t) k * sizeof(__fp16);
         case HTP_TYPE_F32:
@@ -321,8 +336,8 @@ static inline void htp_mm_hmx_get_2d_chunk_costs(
     const bool is_quant = (wtype != HTP_TYPE_F16 && wtype != HTP_TYPE_F32);
     const size_t row_stride = htp_mm_get_tiled_row_stride(wtype, k);
     const size_t vec_dot_size = k * sizeof(uint16_t);
-    const uint32_t n_k_tiles = k / HTP_MM_HMX_TILE_N_COLS;
-    const size_t qweight_row_stride = is_quant ? (size_t)(n_k_tiles * aligned_tile_size) / 32 : 0;
+    const uint32_t n_weight_tiles = k / htp_mm_get_weight_tile_k(wtype);
+    const size_t qweight_row_stride = is_quant ? (size_t)(n_weight_tiles * aligned_tile_size) / 32 : 0;
 
     *size_per_n_out = (pipeline ? 2 : 1) * (is_quant ? qweight_row_stride : row_stride) +
                       (pipeline ? 2 * vec_dot_size : vec_dot_size);
@@ -453,11 +468,11 @@ static inline void htp_mm_hmx_vtcm_layout_build(
         const bool is_quant = (wtype != HTP_TYPE_F16 && wtype != HTP_TYPE_F32);
         const size_t row_stride = htp_mm_get_tiled_row_stride(wtype, k);
         const size_t vec_dot_size = k * sizeof(uint16_t);
-        const uint32_t n_k_tiles = k / HTP_MM_HMX_TILE_N_COLS;
+        const uint32_t n_weight_tiles = k / htp_mm_get_weight_tile_k(wtype);
 
         const size_t min_f32_size = hex_align_up(act_threads * HTP_MM_DMA_ACT_MULTIPLIER * k * sizeof(float), 128);
         const size_t weight_area_size = is_quant
-            ? hex_align_up((nc / 32) * n_k_tiles * aligned_tile_size, HTP_MM_HMX_TILE_SIZE)
+            ? hex_align_up((nc / 32) * n_weight_tiles * aligned_tile_size, HTP_MM_HMX_TILE_SIZE)
             : hex_align_up(nc * row_stride, HTP_MM_HMX_TILE_SIZE);
         const size_t act_area_size    = hex_align_up(mc * vec_dot_size, HTP_MM_HMX_TILE_SIZE);
         const size_t output_area_size = hex_align_up(mc * nc * sizeof(__fp16), HTP_MM_HMX_TILE_SIZE);
@@ -531,14 +546,15 @@ static inline void htp_mm_hvx_vtcm_layout_build(
                             wtype == HTP_TYPE_Q8_0 || wtype == HTP_TYPE_IQ4_NL ||
                             wtype == HTP_TYPE_MXFP4 || wtype == HTP_TYPE_Q6_K ||
                             wtype == HTP_TYPE_Q4_K || wtype == HTP_TYPE_Q5_K ||
-                            wtype == HTP_TYPE_Q3_K || wtype == HTP_TYPE_Q2_K);
+                            wtype == HTP_TYPE_Q3_K || wtype == HTP_TYPE_Q2_K ||
+                            wtype == HTP_TYPE_Q1_0);
 
     if (is_fused_nx) {
         const size_t src0_row_size_padded = hex_round_up(src0_row_size, 128);
 
         size_t weight_sz_per_thread = 0;
 
-        if (is_repack) {
+        if (is_repack && wtype != HTP_TYPE_Q1_0) {
             uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
             uint32_t n_k_tiles = hex_round_up(ne10, 32) / 32;
             uint32_t tile_row_size = n_k_tiles * aligned_tile_size;
@@ -565,7 +581,7 @@ static inline void htp_mm_hvx_vtcm_layout_build(
         size_t src0_sz_per_thread = htp_mm_round_up(n_prefetch * src0_row_size_padded, 256);
         act_sz                    = htp_mm_round_up(act_row_size_tiled * act_nrows, 256);
 
-        if (is_repack) {
+        if (is_repack && wtype != HTP_TYPE_Q1_0) {
             const uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
             const uint32_t n_k_tiles         = ne10 / 32;
             const uint32_t tile_row_size     = n_k_tiles * aligned_tile_size;
@@ -610,9 +626,10 @@ static inline void htp_mm_hvx_vtcm_layout_build(
                 src0_sz = src0_sz * n_threads;
 
                 if (is_repack) {
-                    uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
-                    uint32_t n_k_tiles = ne10 / 32;
-                    uint32_t tile_row_size = n_k_tiles * aligned_tile_size;
+                    const uint32_t tile_k = htp_mm_get_weight_tile_k(wtype);
+                    const uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
+                    const uint32_t n_k_tiles = ne10 / tile_k;
+                    const uint32_t tile_row_size = n_k_tiles * aligned_tile_size;
                     size_t repacked_vtcm_size = htp_mm_round_up(n_prefetch * tile_row_size, 256);
                     src0_sz = repacked_vtcm_size * n_threads;
                 }
